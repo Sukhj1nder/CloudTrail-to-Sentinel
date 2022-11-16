@@ -20,6 +20,7 @@ from constructs import Construct
 class SentinelProps:
     sentinel_worskpace_id: str
     sentinel_account_id: str
+    all_accounts: list[str]
 
 
 class SentinelStack(Stack):
@@ -130,23 +131,19 @@ class SentinelStack(Stack):
             aws_s3_notifications.SqsDestination(self.sentinel_sqs_queue)
         )
         # allow services to access bucket
+        accountArns = [aws_iam.ArnPrincipal(f"arn:aws:iam::{a}:root") for a in props.all_accounts]
+        principals=[
+            aws_iam.ServicePrincipal("logging.s3.amazonaws.com"),
+            aws_iam.ServicePrincipal("lambda.amazonaws.com"),
+            aws_iam.ServicePrincipal("events.amazonaws.com"),
+            aws_iam.ServicePrincipal("config.amazonaws.com"),
+            aws_iam.ServicePrincipal("logs.amazonaws.com"),
+        ] + accountArns
         self.sentinel_bucket.add_to_resource_policy(
             aws_iam.PolicyStatement(
                 sid="S3AllowServices",
                 actions=["s3:GetBucketAcl", "s3:ListBucket", "s3:PutObject"],
-                principals=[
-                    aws_iam.ServicePrincipal("logging.s3.amazonaws.com"),
-                    aws_iam.ServicePrincipal("lambda.amazonaws.com"),
-                    aws_iam.ServicePrincipal("events.amazonaws.com"),
-                    aws_iam.ServicePrincipal("config.amazonaws.com"),
-                    aws_iam.ServicePrincipal("logs.amazonaws.com"),
-                    aws_iam.ArnPrincipal("arn:aws:iam::433833021409:root"),
-                    aws_iam.ArnPrincipal("arn:aws:iam::447644794224:root"),
-                    aws_iam.ArnPrincipal("arn:aws:iam::541899610442:root"),
-                    aws_iam.ArnPrincipal("arn:aws:iam::951237805213:root"),
-                    aws_iam.ArnPrincipal("arn:aws:iam::664860481080:root"),
-                    aws_iam.ArnPrincipal("arn:aws:iam::764858818887:root"),
-                ],
+                principals=principals,
                 resources=[
                     self.sentinel_bucket.bucket_arn,
                     self.sentinel_bucket.arn_for_objects(key_pattern="*"),
@@ -298,4 +295,18 @@ class SentinelStack(Stack):
             "sentinel_bucket_arn_output",
             value=self.sentinel_bucket.bucket_arn,
             export_name="SentinelBucketArn",
+        )
+
+        cdk.CfnOutput(
+            self,
+            "sentinel_role_arn_output",
+            value=self.sentinel_role.role_arn,
+            export_name="SentinelRoleArn",
+        )
+
+        cdk.CfnOutput(
+            self,
+            "sentinel_queue_url_output",
+            value=self.sentinel_sqs_queue.queue_url,
+            export_name="SentinelQueueURL",
         )

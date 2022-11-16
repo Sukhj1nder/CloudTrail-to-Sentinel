@@ -16,7 +16,7 @@ sentinel_props = from_dict(data_class=SentinelProps, data=config)
 
 env = cdk.Environment(account=account, region=region)
 
-SentinelStack(app, "MOJSentinelStack", sentinel_props, env=env)
+SentinelStack(app, "SentinelStack", sentinel_props, env=env)
 
 cdk.Aspects.of(app).add(AwsSolutionsChecks())
 app.synth()

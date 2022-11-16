@@ -11,7 +11,8 @@ app = cdk.App()
 region = app.node.try_get_context("region")
 bucket_name = app.node.try_get_context("bucket_name")
 bucket_arn = app.node.try_get_context("bucket_arn")
-bucket_context: dict = {"bucket_name": bucket_name, "bucket_arn": bucket_arn}
+log_group_name = app.node.try_get_context("log_group_name")
+bucket_context: dict = {"bucket_name": bucket_name, "bucket_arn": bucket_arn, "log_group_name": log_group_name}
 
 stage = app.node.try_get_context("stage")
 context: dict = app.node.try_get_context(stage)
@@ -22,7 +23,7 @@ env = cdk.Environment(account=context["account-id"], region=region)
 
 lambda_stack = LambdaStack(
     app,
-    "MOJLambdaStack",
+    "LambdaStack",
     env=env,
     props=from_dict(data_class=LambdaProps, data=bucket_context),
 )

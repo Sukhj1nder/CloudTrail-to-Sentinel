@@ -26,10 +26,11 @@
 			"aws-cn"
 		],
 		"region": "ap-southeast-2",
-		"account-id": "664860481080",
+		"account-id": "123456789012",
 		"sentinel": {
-			"sentinel_worskpace_id": "5c59a927-f25e-4d9f-9066-37844c4a4402",
-			"sentinel_account_id": "197857026523"
+			"sentinel_worskpace_id": "6a50b922-f23d-4e9a-8076-27648c3a2412",
+			"sentinel_account_id": "197857026523",
+			"all_accounts": ["123456789012", "234567890121", "345678901212"]
 		}
 	}
 }

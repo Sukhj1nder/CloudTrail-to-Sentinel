@@ -26,25 +26,17 @@
 			"aws-cn"
 		],
 		"region": "ap-southeast-2",
-		"bucket_name": "mojsentinelstack-sentinelbucketee5f1b08-162kft8sk05p3",
-		"bucket_arn": "arn:aws:s3:::mojsentinelstack-sentinelbucketee5f1b08-162kft8sk05p3",
+		"bucket_name": "sentinelbucket1337",
+		"bucket_arn": "arn:aws:s3:::sentinelbucket1337",
+		"log_group_name": "aws-controltower/CloudTrailLogs",
 		"audit": {
-			"account-id": "764858818887"
+			"account-id": "123456789012"
 		},
 		"logging": {
-			"account-id": "664860481080"
+			"account-id": "234567890121"
 		},
 		"billing": {
-			"account-id": "951237805213"
-		},
-		"prod": {
-			"account-id": "541899610442"
-		},
-		"tooling": {
-			"account-id": "447644794224"
-		},
-		"uat": {
-			"account-id": "433833021409"
+			"account-id": "345678901212"
 		}
 	}
 }

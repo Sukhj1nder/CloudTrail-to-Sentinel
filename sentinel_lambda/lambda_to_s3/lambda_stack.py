@@ -12,6 +12,7 @@ from constructs import Construct
 class LambdaProps:
     bucket_name: str
     bucket_arn: str
+    log_group_name: str
 
 
 class LambdaStack(Stack):
@@ -44,7 +45,7 @@ class LambdaStack(Stack):
         self.cloudtrail_log_group = aws_logs.LogGroup.from_log_group_name(
             self,
             "cloudtrail_log_group",
-            log_group_name="aws-controltower/CloudTrailLogs",
+            log_group_name=props.log_group_name,
         )
 
         self.cloudtrail_log_group.add_subscription_filter(
