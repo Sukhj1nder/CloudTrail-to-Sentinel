@@ -1,0 +1,50 @@
+{
+	"app": "python3 app.py",
+	"watch": {
+		"include": [
+			"**"
+		],
+		"exclude": [
+			"README.md",
+			"cdk*.json",
+			"requirements*.txt",
+			"source.bat",
+			"**/__init__.py",
+			"python/__pycache__",
+			"tests"
+		]
+	},
+	"context": {
+		"@aws-cdk/aws-apigateway:usagePlanKeyOrderInsensitiveId": true,
+		"@aws-cdk/core:stackRelativeExports": true,
+		"@aws-cdk/aws-rds:lowercaseDbIdentifier": true,
+		"@aws-cdk/aws-lambda:recognizeVersionProps": true,
+		"@aws-cdk/aws-cloudfront:defaultSecurityPolicyTLSv1.2_2021": true,
+		"@aws-cdk-containers/ecs-service-extensions:enableDefaultLogDriver": true,
+		"@aws-cdk/core:target-partitions": [
+			"aws",
+			"aws-cn"
+		],
+		"region": "ap-southeast-2",
+		"bucket_name": "mojsentinelstack-sentinelbucketee5f1b08-162kft8sk05p3",
+		"bucket_arn": "arn:aws:s3:::mojsentinelstack-sentinelbucketee5f1b08-162kft8sk05p3",
+		"audit": {
+			"account-id": "764858818887"
+		},
+		"logging": {
+			"account-id": "664860481080"
+		},
+		"billing": {
+			"account-id": "951237805213"
+		},
+		"prod": {
+			"account-id": "541899610442"
+		},
+		"tooling": {
+			"account-id": "447644794224"
+		},
+		"uat": {
+			"account-id": "433833021409"
+		}
+	}
+}
