@@ -25,18 +25,18 @@
 			"aws",
 			"aws-cn"
 		],
-		"region": "ap-southeast-2",
-		"bucket_name": "sentinelbucket1337",
-		"bucket_arn": "arn:aws:s3:::sentinelbucket1337",
-		"log_group_name": "aws-controltower/CloudTrailLogs",
+		"@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+		"@aws-cdk/core:checkSecretUsage": true,
+		"@aws-cdk/aws-codepipeline:crossAccountKeyAliasStackSafeResourceName": true,
+		"@aws-cdk/aws-s3:createDefaultLoggingPolicy": true,
+		"@aws-cdk/aws-sns-subscriptions:restrictSqsDescryption": true,
+		"@aws-cdk/core:enablePartitionLiterals": true,
+		"region": "us-west-2",
+		"bucket_name": "<NEW-BUCKET-NAME>",
+		"bucket_arn": "<NEW-BUCKET-ARN-NAME>",
+		"log_group_name": "<CLOUDWATCH-LOG-GROUP-NAME>",
 		"audit": {
-			"account-id": "123456789012"
-		},
-		"logging": {
-			"account-id": "234567890121"
-		},
-		"billing": {
-			"account-id": "345678901212"
+			"account-id": "<AWS-ACCOUNT-ID>"
 		}
 	}
 }

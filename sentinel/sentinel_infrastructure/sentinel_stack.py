@@ -3,12 +3,13 @@ from dataclasses import dataclass
 # from typing import Union, Literal
 from aws_cdk import (
     Stack,
-    aws_iam,
-    aws_sqs,
-    aws_kms,
-    aws_s3,
-    aws_s3_notifications,
+    aws_iam as iam,
+    aws_sqs as sqs,
+    aws_kms as kms,
+    aws_s3 as s3,
+    aws_s3_notifications as s3n,
     Duration,
+    CfnOutput,
 )
 import aws_cdk as cdk
 from cdk_nag import NagSuppressions, NagPackSuppression
@@ -32,7 +33,7 @@ class SentinelStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # key for queue encryption
-        self.sqs_key = aws_kms.Key(
+        self.sqs_key = kms.Key(
             self,
             "sentinel_queue_key",
             enable_key_rotation=True,
@@ -40,27 +41,27 @@ class SentinelStack(Stack):
         )
 
         # dlq for sentinel queue
-        self.sentinel_sqs_dlq = aws_sqs.Queue(self, "sentinel_sqs_dlq")
-        dead_letter_queue_settings = aws_sqs.DeadLetterQueue(
+        self.sentinel_sqs_dlq = sqs.Queue(self, "sentinel_sqs_dlq")
+        dead_letter_queue_settings = sqs.DeadLetterQueue(
             max_receive_count=10, queue=self.sentinel_sqs_dlq
         )
 
         # queue for sentinel to consume
-        self.sentinel_sqs_queue = cdk.aws_sqs.Queue(
+        self.sentinel_sqs_queue = sqs.Queue(
             self,
             "sentinel_queue",
-            receive_message_wait_time=cdk.Duration.seconds(20),
-            retention_period=cdk.Duration.days(1),
-            encryption=aws_sqs.QueueEncryption.KMS,
+            receive_message_wait_time=Duration.seconds(20),
+            retention_period=Duration.days(1),
+            encryption=sqs.QueueEncryption.KMS,
             encryption_master_key=self.sqs_key,
             dead_letter_queue=dead_letter_queue_settings,
         )
 
         # role for sentinel to assume
-        self.sentinel_role = cdk.aws_iam.Role(
+        self.sentinel_role = iam.Role(
             self,
             "sentinel_role",
-            assumed_by=cdk.aws_iam.AccountPrincipal(props.sentinel_account_id),
+            assumed_by=iam.AccountPrincipal(props.sentinel_account_id),
             description="Role for sentinel to ingest logs from s3 and check sqs queue for messages",
             external_ids=[props.sentinel_worskpace_id],
             role_name="AWSSentinelRole",
@@ -68,10 +69,10 @@ class SentinelStack(Stack):
 
         # allow sentinel queue to send to dlq
         self.sentinel_sqs_dlq.add_to_resource_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 sid="SQS-Sentinel",
                 actions=["SQS:SendMessage"],
-                principals=[aws_iam.ServicePrincipal("sqs.amazonaws.com")],
+                principals=[iam.ServicePrincipal("sqs.amazonaws.com")],
                 resources=[self.sentinel_sqs_dlq.queue_arn],
                 conditions={
                     "ArnLike": {"aws:SourceArn": self.sentinel_sqs_queue.queue_arn}
@@ -81,21 +82,22 @@ class SentinelStack(Stack):
 
         # Bucket for S3 access logging. This bucket can't be logged and must be
         # encrypted with S3 encryption, KMS encryption won't work
-        self.s3_access_log_bucket = aws_s3.Bucket(
+        self.s3_access_log_bucket = s3.Bucket(
             self,
             "s3_access_logs",
-            encryption=aws_s3.BucketEncryption.S3_MANAGED,
-            block_public_access=aws_s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
+            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,  # Allow ACLs for logging
             lifecycle_rules=[
-                aws_s3.LifecycleRule(enabled=True, expiration=Duration.days(30))
+                s3.LifecycleRule(enabled=True, expiration=Duration.days(30))
             ],
         )
         self.s3_access_log_bucket.add_to_resource_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 sid="S3ServerAccessLogs",
                 actions=["s3:PutObject"],
-                principals=[aws_iam.ServicePrincipal("logging.s3.amazonaws.com")],
+                principals=[iam.ServicePrincipal("logging.s3.amazonaws.com")],
                 resources=[self.s3_access_log_bucket.arn_for_objects(key_pattern="*")],
                 conditions={"StringEquals": {"aws:SourceAccount": self.account}},
             )
@@ -112,35 +114,34 @@ class SentinelStack(Stack):
         )
 
         # Bucket for sentinel logging from lambdas across accounts. Retain for 365 days.
-        # Again can't use KMS encryption, only S3 managed.
-        self.sentinel_bucket = aws_s3.Bucket(
+        self.sentinel_bucket = s3.Bucket(
             self,
             "sentinel_bucket",
-            block_public_access=aws_s3.BlockPublicAccess.BLOCK_ALL,
-            encryption=aws_s3.BucketEncryption.S3_MANAGED,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
             server_access_logs_bucket=self.s3_access_log_bucket,
             versioned=True,
-            object_ownership=aws_s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,  # Changed from BUCKET_OWNER_ENFORCED
             lifecycle_rules=[
-                aws_s3.LifecycleRule(enabled=True, expiration=Duration.days(365))
+                s3.LifecycleRule(enabled=True, expiration=Duration.days(365))
             ],
         )
         # object created event notification for sqs queue
         self.sentinel_bucket.add_object_created_notification(
-            aws_s3_notifications.SqsDestination(self.sentinel_sqs_queue)
+            s3n.SqsDestination(self.sentinel_sqs_queue)
         )
         # allow services to access bucket
-        accountArns = [aws_iam.ArnPrincipal(f"arn:aws:iam::{a}:root") for a in props.all_accounts]
-        principals=[
-            aws_iam.ServicePrincipal("logging.s3.amazonaws.com"),
-            aws_iam.ServicePrincipal("lambda.amazonaws.com"),
-            aws_iam.ServicePrincipal("events.amazonaws.com"),
-            aws_iam.ServicePrincipal("config.amazonaws.com"),
-            aws_iam.ServicePrincipal("logs.amazonaws.com"),
+        accountArns = [iam.ArnPrincipal(f"arn:aws:iam::{a}:root") for a in props.all_accounts]
+        principals = [
+            iam.ServicePrincipal("logging.s3.amazonaws.com"),
+            iam.ServicePrincipal("lambda.amazonaws.com"),
+            iam.ServicePrincipal("events.amazonaws.com"),
+            iam.ServicePrincipal("config.amazonaws.com"),
+            iam.ServicePrincipal("logs.amazonaws.com"),
         ] + accountArns
         self.sentinel_bucket.add_to_resource_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 sid="S3AllowServices",
                 actions=["s3:GetBucketAcl", "s3:ListBucket", "s3:PutObject"],
                 principals=principals,
@@ -152,11 +153,14 @@ class SentinelStack(Stack):
         )
         # allow sentinel role to retrieve from bucket
         self.sentinel_bucket.add_to_resource_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 sid="S3AllowSentinelRole",
-                actions=["s3:GetObject"],
-                principals=[aws_iam.ArnPrincipal(self.sentinel_role.role_arn)],
-                resources=[self.sentinel_bucket.arn_for_objects(key_pattern="*")],
+                actions=["s3:GetObject", "s3:ListBucket"],
+                principals=[iam.ArnPrincipal(self.sentinel_role.role_arn)],
+                resources=[
+                    self.sentinel_bucket.bucket_arn,
+                    self.sentinel_bucket.arn_for_objects(key_pattern="*")
+                ],
             )
         )
 
@@ -175,10 +179,10 @@ class SentinelStack(Stack):
 
         # allow s3 bucket to send to queue
         self.sentinel_sqs_queue.add_to_resource_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 sid="SQS-S3-Notifications",
                 actions=["SQS:SendMessage"],
-                principals=[aws_iam.ServicePrincipal("s3.amazonaws.com")],
+                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
                 resources=[self.sentinel_sqs_queue.queue_arn],
                 conditions={
                     "ArnLike": {"aws:SourceArn": self.sentinel_bucket.bucket_arn}
@@ -188,7 +192,7 @@ class SentinelStack(Stack):
 
         # allow sentinel to consume from queue
         self.sentinel_sqs_queue.add_to_resource_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 sid="SQS-Sentinel-Receive",
                 actions=[
                     "SQS:ChangeMessageVisibility",
@@ -196,7 +200,7 @@ class SentinelStack(Stack):
                     "SQS:ReceiveMessage",
                     "SQS:GetQueueUrl",
                 ],
-                principals=[aws_iam.ArnPrincipal(self.sentinel_role.role_arn)],
+                principals=[iam.ArnPrincipal(self.sentinel_role.role_arn)],
                 resources=[self.sentinel_sqs_queue.queue_arn],
             )
         )
@@ -229,12 +233,12 @@ class SentinelStack(Stack):
 
         # allow sentinel role to decrypt sqs kms key on kms policy
         self.sqs_key.add_to_resource_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 sid="Sentinel-Decrypt",
                 actions=["kms:Decrypt", "kms:GenerateDataKey"],
                 principals=[
-                    aws_iam.ArnPrincipal(self.sentinel_role.role_arn),
-                    aws_iam.ServicePrincipal("s3.amazonaws.com"),
+                    iam.ArnPrincipal(self.sentinel_role.role_arn),
+                    iam.ServicePrincipal("s3.amazonaws.com"),
                 ],
                 resources=["*"],
             )
@@ -242,7 +246,7 @@ class SentinelStack(Stack):
 
         # allow sentinel role to consume from queue
         self.sentinel_role.add_to_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 actions=[
                     "SQS:ChangeMessageVisibility",
                     "SQS:DeleteMessage",
@@ -256,19 +260,22 @@ class SentinelStack(Stack):
 
         # allow sentinel role to retrieve from s3 bucket
         self.sentinel_role.add_to_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 actions=["S3:Get*", "S3:List*"],
-                resources=[self.sentinel_bucket.bucket_arn],
+                resources=[
+                    self.sentinel_bucket.bucket_arn,
+                    self.sentinel_bucket.arn_for_objects(key_pattern="*")
+                ],
             )
         )
 
         # allow sentinel role to decrypt sqs kms key
         self.sentinel_role.add_to_policy(
-            aws_iam.PolicyStatement(
+            iam.PolicyStatement(
                 actions=["kms:Decrypt", "kms:GenerateDataKey"],
                 resources=[
                     self.sqs_key.key_arn
-                ],  # , props.management_account_kms_key_arn],
+                ],
             )
         )
 
@@ -283,28 +290,28 @@ class SentinelStack(Stack):
             True,
         )
 
-        cdk.CfnOutput(
+        CfnOutput(
             self,
             "sentinel_bucket_name_output",
             value=self.sentinel_bucket.bucket_name,
             export_name="SentinelBucketName",
         )
 
-        cdk.CfnOutput(
+        CfnOutput(
             self,
             "sentinel_bucket_arn_output",
             value=self.sentinel_bucket.bucket_arn,
             export_name="SentinelBucketArn",
         )
 
-        cdk.CfnOutput(
+        CfnOutput(
             self,
             "sentinel_role_arn_output",
             value=self.sentinel_role.role_arn,
             export_name="SentinelRoleArn",
         )
 
-        cdk.CfnOutput(
+        CfnOutput(
             self,
             "sentinel_queue_url_output",
             value=self.sentinel_sqs_queue.queue_url,
