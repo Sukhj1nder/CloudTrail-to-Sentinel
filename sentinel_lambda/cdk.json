@@ -35,6 +35,8 @@
 		"bucket_name": "<NEW-BUCKET-NAME>",
 		"bucket_arn": "<NEW-BUCKET-ARN-NAME>",
 		"log_group_name": "<CLOUDWATCH-LOG-GROUP-NAME>",
+		"processing_mode": "scheduled",
+		"schedule_hours": 2,
 		"audit": {
 			"account-id": "<AWS-ACCOUNT-ID>"
 		}

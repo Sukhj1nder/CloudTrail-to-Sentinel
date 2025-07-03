@@ -2,7 +2,7 @@ import os
 import gzip
 import json
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import boto3
 import logging
 from typing import Dict, Any, List
@@ -11,22 +11,26 @@ from typing import Dict, Any, List
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    Lambda function to process CloudTrail logs from CloudWatch Logs
+    Lambda function that runs every 2 hours to scan CloudTrail logs from CloudWatch
     and forward filtered events to S3 bucket for Sentinel ingestion.
     
     Args:
-        event: CloudWatch Logs event data
+        event: EventBridge scheduled event
         context: Lambda context object
         
     Returns:
         Dict containing status code and response body
     """
     
-    # Get S3 bucket name from environment
+    logger.info("Starting scheduled CloudTrail log processing (2-hour interval)")
+    
+    # Get configuration from environment
     s3_bucket = os.environ.get("S3_BUCKET")
+    scan_interval_hours = int(os.environ.get("SCAN_INTERVAL_HOURS", "2"))
+    log_group_name = os.environ.get("LOG_GROUP_NAME", "aws-controltower/CloudTrailLogs")
+    
     if not s3_bucket:
         logger.error("No S3 bucket specified in environment variables")
         return {
@@ -34,81 +38,169 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "body": json.dumps({"error": "Missing S3_BUCKET environment variable"})
         }
 
-    try:
-        # Decode and decompress CloudWatch Logs data
-        compressed_data = event["awslogs"]["data"]
-        compressed_payload = base64.b64decode(compressed_data)
-        uncompressed_payload = gzip.decompress(compressed_payload)
-        log_data = json.loads(uncompressed_payload.decode('utf-8'))
-        
-        logger.info(f"Processing {len(log_data.get('logEvents', []))} log events")
-        
-    except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as error:
-        logger.error(f"Failed to decode CloudWatch Logs data: {error}")
-        return {
-            "statusCode": 400, 
-            "body": json.dumps({"error": f"Failed to decode log data: {str(error)}"})
-        }
-    except Exception as error:
-        logger.error(f"Unexpected error during data decoding: {error}")
-        return {
-            "statusCode": 500, 
-            "body": json.dumps({"error": f"Unexpected error: {str(error)}"})
-        }
-
-    # Process log events
-    records: List[str] = []
-    region = "default"
+    # Calculate time range for scanning (last 2 hours + 5 minute buffer)
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(hours=scan_interval_hours, minutes=5)
     
-    for log_event in log_data.get("logEvents", []):
-        message = log_event.get("message", "")
-        if not message.strip():
-            continue
-            
-        try:
-            # Parse the CloudTrail record to validate it's proper JSON
-            ct_record = json.loads(message)
-            
-            # Get region from first valid record
-            if region == "default" and "awsRegion" in ct_record:
-                region = ct_record["awsRegion"]
-            
-            records.append(message)
+    logger.info(f"Scanning CloudTrail logs from {start_time.isoformat()} to {end_time.isoformat()}")
+    
+    try:
+        # Query CloudWatch Logs for events in the time range
+        logs_client = boto3.client('logs')
+        
+        # Filter pattern for security-relevant events
+        filter_pattern = ('{ $.eventSource = "signin.amazonaws.com" '
+                         '|| $.eventSource = "sso.amazonaws.com" '
+                         '|| $.eventSource = "wafv2.amazonaws.com" '
+                         '|| $.eventSource = "secretsmanager.amazonaws.com" '
+                         '|| $.eventSource = "guardduty.amazonaws.com" '
+                         '|| $.eventSource = "route53.amazonaws.com" '
+                         '|| $.eventSource = "iam.amazonaws.com" }')
+        
+        # Convert to milliseconds for AWS API
+        start_time_ms = int(start_time.timestamp() * 1000)
+        end_time_ms = int(end_time.timestamp() * 1000)
+        
+        # Scan CloudWatch Logs
+        all_events = []
+        next_token = None
+        
+        while True:
+            try:
+                if next_token:
+                    response = logs_client.filter_log_events(
+                        logGroupName=log_group_name,
+                        startTime=start_time_ms,
+                        endTime=end_time_ms,
+                        filterPattern=filter_pattern,
+                        nextToken=next_token,
+                        limit=1000  # Process in batches
+                    )
+                else:
+                    response = logs_client.filter_log_events(
+                        logGroupName=log_group_name,
+                        startTime=start_time_ms,
+                        endTime=end_time_ms,
+                        filterPattern=filter_pattern,
+                        limit=1000
+                    )
                 
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse CloudTrail record: {e}")
-            continue
-        except Exception as e:
-            logger.warning(f"Unexpected error processing log event: {e}")
-            continue
-
-    # If no valid records, return success (nothing to process)
-    if not records:
-        logger.info("No valid CloudTrail records to process")
+                events = response.get('events', [])
+                all_events.extend(events)
+                
+                logger.info(f"Retrieved {len(events)} events in this batch, total: {len(all_events)}")
+                
+                # Check if there are more events
+                next_token = response.get('nextToken')
+                if not next_token:
+                    break
+                    
+            except Exception as e:
+                logger.error(f"Error querying CloudWatch Logs: {e}")
+                break
+        
+        if not all_events:
+            logger.info("No events found in the specified time range")
+            return {
+                "statusCode": 200,
+                "body": json.dumps({
+                    "message": "No events found in scheduled scan",
+                    "timeRange": f"{start_time.isoformat()} to {end_time.isoformat()}",
+                    "eventsProcessed": 0
+                })
+            }
+        
+        # Process and filter the events
+        valid_records = []
+        invalid_count = 0
+        
+        for event in all_events:
+            try:
+                # Parse the CloudTrail record to validate it's proper JSON
+                ct_record = json.loads(event['message'])
+                
+                # Additional filtering can be done here if needed
+                event_source = ct_record.get('eventSource', '')
+                event_name = ct_record.get('eventName', '')
+                
+                # Optional: Filter out read-only events for reduced volume
+                # if ct_record.get('readOnly', False):
+                #     continue
+                
+                valid_records.append(event['message'])
+                
+            except (json.JSONDecodeError, KeyError) as e:
+                invalid_count += 1
+                logger.debug(f"Skipped invalid CloudTrail record: {e}")
+                continue
+        
+        logger.info(f"Processed {len(all_events)} total events, {len(valid_records)} valid records, {invalid_count} invalid")
+        
+        if not valid_records:
+            return {
+                "statusCode": 200,
+                "body": json.dumps({
+                    "message": "No valid CloudTrail records found",
+                    "totalEvents": len(all_events),
+                    "validRecords": 0
+                })
+            }
+        
+        # Upload to S3 in batches if needed (to handle large volumes)
+        batch_size = 1000  # Adjust based on Lambda memory and timeout
+        upload_results = []
+        
+        for i in range(0, len(valid_records), batch_size):
+            batch = valid_records[i:i + batch_size]
+            result = upload_batch_to_s3(batch, s3_bucket, i // batch_size + 1, start_time, end_time)
+            upload_results.append(result)
+        
+        # Summary of results
+        total_uploaded = sum(r.get('recordsUploaded', 0) for r in upload_results)
+        
+        logger.info(f"Successfully processed {total_uploaded} records in {len(upload_results)} batch(es)")
+        
         return {
-            "statusCode": 200, 
-            "body": json.dumps({"message": "No records to process", "recordsProcessed": 0})
+            "statusCode": 200,
+            "body": json.dumps({
+                "message": "Successfully processed scheduled CloudTrail logs",
+                "timeRange": f"{start_time.isoformat()} to {end_time.isoformat()}",
+                "totalEventsScanned": len(all_events),
+                "validRecordsFound": len(valid_records),
+                "recordsUploaded": total_uploaded,
+                "batchesUploaded": len(upload_results),
+                "uploadResults": upload_results
+            })
+        }
+        
+    except Exception as error:
+        logger.error(f"Error in scheduled CloudTrail processing: {error}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "error": f"Scheduled processing failed: {str(error)}",
+                "timeRange": f"{start_time.isoformat()} to {end_time.isoformat()}"
+            })
         }
 
-    # Create CloudTrail Records format
-    records_json = f'{{"Records":[{",".join(records)}]}}'
-    
-    # Generate S3 key path following CloudTrail convention
-    now = datetime.now(timezone.utc)
-    owner = log_data.get("owner", "unknown")
-    
-    # Format: AWSLogs/{account}/CloudTrail/{region}/{year}/{month}/{day}/{filename}
-    s3_key = (
-        f"AWSLogs/{owner}/CloudTrail/{region}/"
-        f"{now.year:04d}/{now.month:02d}/{now.day:02d}/"
-        f"{owner}_CloudTrail_{region}_{now.strftime('%Y%m%d_%H%M%S_%f')}.json.gz"
-    )
+def upload_batch_to_s3(records: List[str], s3_bucket: str, batch_number: int, 
+                      start_time: datetime, end_time: datetime) -> Dict[str, Any]:
+    """Upload a batch of CloudTrail records to S3"""
     
     try:
-        # Upload to S3 using client (more efficient than resource for this use case)
-        s3_client = boto3.client("s3")
+        # Create CloudTrail Records format
+        records_json = f'{{"Records":[{",".join(records)}]}}'
         
-        # Compress the data
+        # Generate S3 key path following CloudTrail convention
+        now = datetime.now(timezone.utc)
+        s3_key = (
+            f"AWSLogs/scheduled/CloudTrail/"
+            f"{now.year:04d}/{now.month:02d}/{now.day:02d}/"
+            f"scheduled_CloudTrail_batch{batch_number:03d}_{now.strftime('%Y%m%d_%H%M%S')}.json.gz"
+        )
+        
+        # Upload to S3
+        s3_client = boto3.client("s3")
         compressed_data = gzip.compress(records_json.encode('utf-8'))
         
         s3_client.put_object(
@@ -118,35 +210,31 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             ContentEncoding="gzip",
             ContentType="application/json",
             Metadata={
-                "source": "cloudtrail-lambda-forwarder",
+                "source": "cloudtrail-lambda-scheduled",
                 "recordCount": str(len(records)),
-                "region": region,
-                "processedAt": now.isoformat()
+                "batchNumber": str(batch_number),
+                "scanStartTime": start_time.isoformat(),
+                "scanEndTime": end_time.isoformat(),
+                "processedAt": now.isoformat(),
+                "processingMode": "scheduled-2hour"
             },
-            ServerSideEncryption="AES256"  # Ensure encryption at rest
+            ServerSideEncryption="AES256"
         )
         
-        logger.info(f"Successfully uploaded {len(records)} records to s3://{s3_bucket}/{s3_key}")
+        logger.info(f"Uploaded batch {batch_number} with {len(records)} records to s3://{s3_bucket}/{s3_key}")
         
         return {
-            "statusCode": 200,
-            "body": json.dumps({
-                "message": "Successfully processed CloudTrail logs",
-                "recordsProcessed": len(records),
-                "s3Key": s3_key,
-                "s3Bucket": s3_bucket
-            })
+            "batchNumber": batch_number,
+            "recordsUploaded": len(records),
+            "s3Key": s3_key,
+            "status": "success"
         }
         
-    except boto3.exceptions.S3UploadFailedError as error:
-        logger.error(f"S3 upload failed: {error}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": f"S3 upload failed: {str(error)}"})
-        }
     except Exception as error:
-        logger.error(f"Unexpected error during S3 upload: {error}")
+        logger.error(f"Failed to upload batch {batch_number} to S3: {error}")
         return {
-            "statusCode": 500,
-            "body": json.dumps({"error": f"Failed to upload to S3: {str(error)}"})
+            "batchNumber": batch_number,
+            "recordsUploaded": 0,
+            "error": str(error),
+            "status": "failed"
         }

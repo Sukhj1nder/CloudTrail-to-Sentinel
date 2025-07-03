@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 
-# from typing import Union, Literal
 from aws_cdk import (
     Stack, 
     aws_iam as iam, 
     aws_lambda as _lambda, 
     aws_logs as logs, 
-    aws_logs_destinations as logs_destinations,
+    aws_events as events,
+    aws_events_targets as targets,
     Duration,
     CfnOutput
 )
@@ -24,26 +24,31 @@ class LambdaProps:
 
 
 class LambdaStack(Stack):
-    """Generate the Lambda AWS infrastructure for Sentinel. Lambda function, execution role and cloudwatch logs group"""
+    """Generate the Lambda AWS infrastructure for Sentinel. Lambda function runs every 2 hours to scan CloudWatch logs"""
 
     def __init__(
         self, scope: Construct, construct_id: str, props: LambdaProps, **kwargs
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # Create Lambda function with Python 3.11 runtime
+        # Create Lambda function for scheduled processing every 2 hours
         self.sentinel_function = _lambda.Function(
             self,
             "sentinel_function",
             code=_lambda.Code.from_asset("./lambda_to_s3/function"),
             handler="sentinel_function.handler",
-            runtime=_lambda.Runtime.PYTHON_3_11,  # UPDATED: Changed from PYTHON_3_9 to PYTHON_3_11
-            environment={"S3_BUCKET": props.bucket_name},
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            environment={
+                "S3_BUCKET": props.bucket_name,
+                "PROCESSING_MODE": "scheduled",
+                "SCAN_INTERVAL_HOURS": "2",
+                "LOG_GROUP_NAME": props.log_group_name
+            },
             log_retention=logs.RetentionDays.TWO_WEEKS,
-            timeout=Duration.minutes(5),  # ADDED: Explicit timeout for processing CloudTrail logs
-            memory_size=256,  # ADDED: Explicit memory size
-            description="Processes CloudTrail logs and forwards filtered events to S3 for Sentinel ingestion",
-            architecture=_lambda.Architecture.X86_64,  # ADDED: Explicit architecture
+            timeout=Duration.minutes(10),  # Increased timeout for batch processing
+            memory_size=512,  # Increased memory for processing larger batches
+            description="Processes CloudTrail logs every 2 hours and forwards filtered events to S3",
+            architecture=_lambda.Architecture.X86_64,
         )
 
         # Grant S3 permissions to Lambda
@@ -55,41 +60,45 @@ class LambdaStack(Stack):
             )
         )
 
-        # ADDED: CloudWatch Logs permissions for Lambda function
+        # Grant CloudWatch Logs permissions for reading log events
         self.sentinel_function.add_to_role_policy(
             iam.PolicyStatement(
-                sid="CloudWatchLogsAccess",
+                sid="CloudWatchLogsRead",
                 actions=[
-                    "logs:CreateLogGroup",
-                    "logs:CreateLogStream", 
+                    "logs:FilterLogEvents",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeLogStreams",
+                    "logs:CreateLogStream",
                     "logs:PutLogEvents"
                 ],
-                resources=[f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/lambda/*"],
+                resources=[
+                    f"arn:aws:logs:{self.region}:{self.account}:log-group:{props.log_group_name}:*",
+                    f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/lambda/*"
+                ],
             )
         )
 
-        # Import CloudTrail log group managed by Control Tower
+        # Create EventBridge rule to trigger Lambda every 2 hours
+        scheduled_rule = events.Rule(
+            self,
+            "SentinelScheduledRule",
+            description="Trigger Sentinel Lambda function every 2 hours to process CloudTrail logs",
+            schedule=events.Schedule.rate(Duration.hours(2))  # Every 2 hours
+        )
+
+        # Add the Lambda function as a target for the scheduled rule
+        scheduled_rule.add_target(
+            targets.LambdaFunction(
+                self.sentinel_function,
+                retry_attempts=2,  # Retry failed executions
+            )
+        )
+
+        # Import CloudTrail log group for reference (but don't create subscription filter)
         self.cloudtrail_log_group = logs.LogGroup.from_log_group_name(
             self,
             "cloudtrail_log_group",
             log_group_name=props.log_group_name,
-        )
-
-        # Add subscription filter with improved filter pattern
-        self.cloudtrail_log_group.add_subscription_filter(
-            "lambda_subscription_filter",
-            destination=logs_destinations.LambdaDestination(
-                fn=self.sentinel_function
-            ),
-            filter_pattern=logs.FilterPattern.literal(
-                '{ $.eventSource = "signin.amazonaws.com" '
-                '|| $.eventSource = "sso.amazonaws.com" '
-                '|| $.eventSource = "wafv2.amazonaws.com" '
-                '|| $.eventSource = "secretsmanager.amazonaws.com" '
-                '|| $.eventSource = "guardduty.amazonaws.com" '
-                '|| $.eventSource = "route53.amazonaws.com" '
-                '|| $.eventSource = "iam.amazonaws.com" }'
-            ),
         )
 
         # Add CDK-Nag suppressions
@@ -118,7 +127,7 @@ class LambdaStack(Stack):
             True,
         )
 
-        # Output Lambda function ARN for reference
+        # Outputs
         CfnOutput(
             self,
             "SentinelLambdaFunctionArn",
@@ -127,11 +136,17 @@ class LambdaStack(Stack):
             description="ARN of the Sentinel CloudTrail processing Lambda function"
         )
 
-        # Output Lambda function name for reference
         CfnOutput(
             self,
-            "SentinelLambdaFunctionName",
-            value=self.sentinel_function.function_name,
-            export_name="SentinelLambdaFunctionName",
-            description="Name of the Sentinel CloudTrail processing Lambda function"
+            "SentinelScheduleRule",
+            value=scheduled_rule.rule_arn,
+            export_name="SentinelScheduleRuleArn",
+            description="ARN of the EventBridge rule that triggers Lambda every 2 hours"
+        )
+
+        CfnOutput(
+            self,
+            "ProcessingConfiguration",
+            value="Mode: Scheduled every 2 hours, Memory: 512MB, Timeout: 10min",
+            description="Lambda processing configuration details"
         )
